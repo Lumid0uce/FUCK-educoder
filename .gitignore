@@ -1,0 +1,3 @@
+node_modules/
+tests/.profile-e2e/
+.tmp/

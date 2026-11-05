@@ -1,0 +1,52 @@
+{
+  "name": "dsh-educoder-auto",
+  "version": "0.3.0",
+  "description": "自动做题与写作插件：头歌（Educoder）给网址就抓题干、AI 出代码/答案、写回并提交评测；iWrite（iwrite.unipus.cn）按体裁/词数/要点自动写英语作文并提交。带拟人化节奏与代码风格对齐",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "educoder",
+    "头歌",
+    "iwrite",
+    "unipus",
+    "essay",
+    "automation",
+    "ai-solver"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "lib",
+    "bin",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "test:all": "node tests/run.mjs --all",
+    "cli": "node bin/educoder-auto.mjs"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1",
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "bin": {
+    "educoder-auto": "./bin/educoder-auto.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.64.1"
+  }
+}
