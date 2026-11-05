@@ -17,10 +17,23 @@
 
 ## 装
 
-插件已经 link 进 `desktop` profile 了。换机器的话：
+**从 GitHub 直接装（推荐）**：
 
 ```bash
-dsh plugin --profile desktop add link:/path/to/educoder-auto
+dsh plugin --profile desktop add git+https://github.com/Lumidouces/dsh-educoder-auto.git
+```
+
+也可以钉版本：
+
+```bash
+dsh plugin --profile desktop add git+https://github.com/Lumidouces/dsh-educoder-auto.git#v0.3.0
+```
+
+**本地开发**（clone 后 link，改代码即时生效）：
+
+```bash
+git clone https://github.com/Lumidouces/dsh-educoder-auto.git
+dsh plugin --profile desktop add link:/path/to/dsh-educoder-auto
 ```
 
 装完**重启 DSH**（服务端插件不是热更新的）。
