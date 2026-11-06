@@ -23,6 +23,9 @@ import * as session from './lib/session.mjs';
 import * as iwriteSolver from './lib/iwrite-solver.mjs';
 import * as iwriteSession from './lib/iwrite-session.mjs';
 import * as iwriteApi from './lib/iwrite-api.mjs';
+import * as chaoxingSolver from './lib/chaoxing-solver.mjs';
+import * as chaoxingSession from './lib/chaoxing-session.mjs';
+import * as chaoxingApi from './lib/chaoxing-api.mjs';
 import { pickRoute, routeSupportsImages } from './lib/ai.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -109,6 +112,25 @@ const DEFAULTS = {
     /** 单篇最多跑多久（毫秒）：拟人节奏下一篇 300 词作文要 30~60 分钟，给 2 小时。 */
     taskTimeoutMs: 7_200_000,
   },
+
+  // ── 学习通（超星）作业 ────────────────────────────────────────────────
+  /**
+   * 学习通作业部分。同样独立：自己的登录态（chaoxing-session.json）、
+   * 自己的浏览器 profile，和头歌/iWrite 互不干扰。
+   * 走移动端 API（mooc1-api.chaoxing.com），不开浏览器抓题。
+   */
+  chaoxing: {
+    /** 是否真的交卷。false = 只暂存（老师那边看不到，可以自己再检查）。 */
+    autoSubmit: true,
+    /** 暂存后回读页面对答案，核对无误才交卷。建议保持开着。 */
+    verify: true,
+    /** 每题之间的间隔（毫秒），0 = 不留停顿。留一点更像人在做题、也不容易触发风控。 */
+    gapMs: 0,
+    /** 额外作答要求（会拼进 prompt）。 */
+    extra: '',
+    /** 一份作业最多跑多久（毫秒）：抓题 + 模型 + 逐题暂存 + 回读 + 交卷。 */
+    taskTimeoutMs: 1_800_000,
+  },
 };
 
 /** 深合并用户配置到默认值。 */
@@ -156,6 +178,11 @@ function browserOptsOf(config) {
  */
 function iwriteBrowserOptsOf(config) {
   return { ...browserOptsOf(config), profileDir: iwriteSession.profileDir() };
+}
+
+/** 学习通同理：再开一份独立 profile。 */
+function chaoxingBrowserOptsOf(config) {
+  return { ...browserOptsOf(config), profileDir: chaoxingSession.profileDir() };
 }
 
 /** 读技能正文（打包时随插件分发）。 */
@@ -934,9 +961,283 @@ export function apply(ctx, rawConfig) {
     },
   };
 
+  // ══════════════════════════════════════════════════════════════════════
+  // 学习通（超星作业）
+  // ══════════════════════════════════════════════════════════════════════
+
+  const chaoxingConfig = config.chaoxing ?? {};
+
+  // ── 工具 7：学习通作业 ────────────────────────────────────────────────
+  const chaoxingSolveTool = {
+    name: 'chaoxing_solve',
+    description: [
+      '自动完成学习通（超星 mooc1-api.chaoxing.com）上的一份作业。',
+      '不传网址就自动挑作业列表里的第一份，也可以给作业地址、task 地址或标题关键词。',
+      '流程：列作业 → 抓题 → AI 作答 → 逐题暂存 → 回读页面对答案 → 确认无误再交卷。',
+      '注意：会真实暂存/提交作业（submit=false 就只暂存不交卷）。',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description:
+            '作业地址：doHomeWork 链接、或作业列表里的 android/mtaskmsgspecial 链接都行。不传则自动挑列表第一份',
+        },
+        pick: {
+          type: 'string',
+          description: '不传 url 时用来挑作业：课程/作业标题的关键词，或列表里的序号（1 起）',
+        },
+        submit: { type: 'boolean', description: '是否真的交卷。false = 只暂存（老师那边看不到）。默认跟随配置' },
+        verify: { type: 'boolean', description: '暂存后回读页面对答案，默认 true' },
+        extra: { type: 'string', description: '额外作答要求，会拼进 prompt，例如「全用英文作答」' },
+        gapMs: { type: 'number', description: '每题之间的间隔毫秒，0 = 不留停顿' },
+      },
+      additionalProperties: false,
+    },
+    timeoutMs: chaoxingConfig.taskTimeoutMs ?? 1_800_000,
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          submitted: { type: 'boolean' },
+          reason: { type: 'string' },
+          workUrl: { type: 'string' },
+          title: { type: 'string' },
+          count: { type: 'number' },
+          questions: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          answers: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          problems: { type: 'array', items: { type: 'string' } },
+          verified: { type: 'object', additionalProperties: true },
+          trace: { type: 'string' },
+          raw: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: true,
+      },
+      render: (args, value) => {
+        const head = value.ok
+          ? `✅ ${value.submitted ? '作业已交卷' : '答案已暂存（未交卷）'}：共 ${value.count} 道题`
+          : `⚠️ 没完成：${value.reason || '未知原因'}`;
+        const blocks = [{ type: 'text', text: head }];
+        if (value.title) blocks.push({ type: 'text', text: `作业：${value.title}` });
+        if (value.trace) blocks.push({ type: 'text', text: value.trace });
+        if (value.verified) {
+          const v = value.verified;
+          blocks.push({
+            type: 'text',
+            text: `回读校验：${v.ok ? '✅ 一致' : `⚠️ ${v.mismatch?.length ?? 0} 道对不上`}（核对 ${v.matched ?? 0} 道）${
+              v.mismatch?.length
+                ? '\n' + v.mismatch.map((m) => `- 题 ${m.questionId}：${m.reason || '不一致'}`).join('\n')
+                : ''
+            }`,
+          });
+        }
+        if (value.problems?.length) {
+          blocks.push({ type: 'text', text: '待注意：\n' + value.problems.map((p) => '- ' + p).join('\n') });
+        }
+        if (value.answers?.length) {
+          const lines = value.answers.map((a) => `${a.no}. [${a.kind}] ${a.answer}${a.truncated ? '…' : ''}`);
+          blocks.push({ type: 'text', text: '答案：\n' + lines.join('\n') });
+        }
+        if (value.raw) blocks.push({ type: 'text', text: '模型原始输出（解析失败）：\n' + value.raw });
+        return blocks;
+      },
+    },
+    async execute(args, exec) {
+      const trace = chaoxingSolver.createTrace();
+      const result = await chaoxingSolver.solveWork({
+        workUrl: args.url,
+        pick: args.pick,
+        llm: ctx.get('llm'),
+        aiConfig,
+        submit: args.submit ?? chaoxingConfig.autoSubmit !== false,
+        verify: args.verify ?? chaoxingConfig.verify !== false,
+        extra: args.extra ?? chaoxingConfig.extra ?? undefined,
+        gapMs: args.gapMs ?? chaoxingConfig.gapMs ?? 0,
+        trace,
+        signal: exec?.signal,
+      });
+      return pruneUndefined({
+        ok: result.ok === true,
+        submitted: result.submitted === true,
+        reason: result.reason ?? '',
+        workUrl: result.workUrl ?? '',
+        title: result.title ?? '',
+        count: result.count ?? 0,
+        questions: result.questions ?? [],
+        answers: result.answers ?? [],
+        problems: result.problems ?? [],
+        verified: result.verified ?? undefined,
+        trace: result.trace ?? trace.text(),
+        raw: result.raw ?? undefined,
+      });
+    },
+  };
+
+  // ── 工具 8：学习通登录 ────────────────────────────────────────────────
+  const chaoxingLoginTool = {
+    name: 'chaoxing_login',
+    description:
+      '登录学习通（超星）。会弹一个有头的 Edge 窗口，你在里面登录一次（手机号/扫码 + 人机验证），' +
+      '登成功后自动抓 cookie 存到本地（chmod 600），之后 chaoxing_status / chaoxing_solve 直接复用。',
+    parameters: {
+      type: 'object',
+      properties: {
+        timeoutSec: { type: 'number', description: '等待登录的最长秒数，默认 300' },
+        force: { type: 'boolean', description: '已保存的登录态还有效时也重新登一次，默认 false' },
+      },
+      additionalProperties: false,
+    },
+    timeoutMs: 420_000,
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          message: { type: 'string' },
+          sessionFile: { type: 'string' },
+          user: { type: 'object', additionalProperties: true },
+          screenshot: { type: 'string' },
+        },
+        required: ['ok', 'message'],
+        additionalProperties: true,
+      },
+      render: (args, value) => [{ type: 'text', text: value.message }],
+    },
+    async execute(args) {
+      const log = (m) => logger?.info?.(`educoder-auto/chaoxing: ${m}`);
+
+      if (args.force !== true) {
+        const saved = await chaoxingSession.loadSession();
+        if (saved?.cookies && Object.keys(saved.cookies).length) {
+          const check = await chaoxingSession.validateCookies(saved.cookies).catch((e) => ({ ok: false, reason: e.message }));
+          if (check.ok) {
+            return pruneUndefined({
+              ok: true,
+              mode: 'reuse',
+              message: `学习通登录态还有效，直接复用（${chaoxingSession.sessionFile()}）。`,
+              sessionFile: chaoxingSession.sessionFile(),
+              user: check.user,
+            });
+          }
+          log(`已存的登录态失效了（${check.reason}），重新登一次`);
+        }
+      }
+
+      try {
+        const payload = await chaoxingSession.loginInteractive({
+          log,
+          timeoutMs: (args.timeoutSec ?? 300) * 1000,
+          browserOpts: chaoxingBrowserOptsOf(config),
+        });
+        return pruneUndefined({
+          ok: true,
+          mode: 'interactive',
+          message: `学习通登录成功，登录态已保存（${chaoxingSession.sessionFile()}）。`,
+          sessionFile: chaoxingSession.sessionFile(),
+          user: payload.user,
+          screenshot: payload.screenshot,
+        });
+      } catch (error) {
+        return pruneUndefined({
+          ok: false,
+          mode: 'interactive',
+          message: `学习通登录没成功：${error.message}`,
+          sessionFile: chaoxingSession.sessionFile(),
+          screenshot: error.screenshot,
+        });
+      }
+    },
+  };
+
+  // ── 工具 9：学习通状态 ────────────────────────────────────────────────
+  const chaoxingStatusTool = {
+    name: 'chaoxing_status',
+    description: '检查学习通插件的状态：登录态是否有效、作业列表里有哪些待做作业、AI 路由是否可用。',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    timeoutMs: 120_000,
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          login: { type: 'object', additionalProperties: true },
+          works: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          ai: { type: 'object', additionalProperties: true },
+          text: { type: 'string' },
+        },
+        required: ['ok', 'text'],
+        additionalProperties: true,
+      },
+      render: (args, value) => [{ type: 'text', text: value.text }],
+    },
+    async execute() {
+      const lines = [];
+      let ok = true;
+      let works = [];
+
+      const saved = await chaoxingSession.loadSession();
+      let login = { saved: Boolean(saved), ok: false };
+      if (saved?.cookies && Object.keys(saved.cookies).length) {
+        const check = await chaoxingSession.validateCookies(saved.cookies).catch((e) => ({ ok: false, reason: e.message }));
+        login = { saved: true, ok: check.ok, user: check.user, reason: check.reason, savedAt: saved.savedAt };
+      } else {
+        login.reason = '还没有登录态，运行 chaoxing_login';
+      }
+      if (!login.ok) ok = false;
+      lines.push(
+        `学习通登录：${login.ok ? '✅ 有效' + (login.user?.name ? `（${login.user.name}）` : '') : '❌ ' + (login.reason || '登录态已失效，重新运行 chaoxing_login')}` +
+          (login.savedAt ? `（保存于 ${login.savedAt}）` : ''),
+      );
+
+      if (login.ok) {
+        try {
+          works = await chaoxingApi.listWorks(saved.cookies);
+          lines.push(`作业入口：${works.length} 份`);
+          for (const w of works.slice(0, 10)) {
+            lines.push(`  ${w.index}. ${w.title || '（无标题）'}`);
+          }
+        } catch (error) {
+          lines.push(`作业列表拉取失败：${error.message}`);
+        }
+      }
+
+      let aiInfo = { ok: false };
+      const llm = ctx.get('llm');
+      if (llm) {
+        try {
+          aiInfo = { ok: true, route: await pickRoute(llm, aiConfig) };
+        } catch (error) {
+          aiInfo = { ok: false, reason: error.message };
+        }
+      } else {
+        aiInfo = { ok: false, reason: '宿主没有 llm 服务' };
+      }
+      if (!aiInfo.ok && !(aiConfig.baseURL && aiConfig.apiKey)) ok = false;
+      lines.push(`AI：${aiInfo.ok ? `✅ ${aiInfo.route.provider} / ${aiInfo.route.model}` : '❌ ' + (aiInfo.reason || '没有可用路由')}`);
+
+      lines.push(`交卷：${chaoxingConfig.autoSubmit === false ? '⏹ 只暂存（不交卷）' : '✅ 会真的交卷'}`);
+      lines.push(`回读校验：${chaoxingConfig.verify === false ? '⏹ 关' : '✅ 开'} · 每题间隔 ${chaoxingConfig.gapMs ?? 0}ms`);
+
+      return pruneUndefined({ ok, login, works, ai: aiInfo, text: lines.join('\n') });
+    },
+  };
+
   // ── 注册 ──────────────────────────────────────────────────────────────
   const disposers = [];
-  for (const tool of [solveTool, loginTool, statusTool, iwriteSolveTool, iwriteLoginTool, iwriteStatusTool]) {
+  for (const tool of [
+    solveTool,
+    loginTool,
+    statusTool,
+    iwriteSolveTool,
+    iwriteLoginTool,
+    iwriteStatusTool,
+    chaoxingSolveTool,
+    chaoxingLoginTool,
+    chaoxingStatusTool,
+  ]) {
     try {
       disposers.push(tools.register(tool));
     } catch (error) {
@@ -953,7 +1254,7 @@ export function apply(ctx, rawConfig) {
         skills.register({
           name: 'educoder-auto',
           description:
-            '自动做题与写作：头歌（Educoder）给题目网址就抓题干、AI 出代码/答案、写回并提交评测；iWrite（iwrite.unipus.cn）按体裁词数要点要求自动写英语作文并提交',
+            '自动做题与写作：头歌（Educoder）给题目网址就抓题干、AI 出代码/答案、写回并提交评测；iWrite（iwrite.unipus.cn）按体裁词数要点要求自动写英语作文并提交；学习通（超星）抓整份作业的题、AI 逐题作答、暂存回读校验后交卷',
           source: 'dsh-educoder-auto',
           content: body,
         }),
@@ -974,7 +1275,7 @@ export function apply(ctx, rawConfig) {
   }, 'educoder-auto: teardown');
 
   logger?.info?.(
-    'educoder-auto: 已注册 educoder_solve / educoder_login / educoder_status / iwrite_solve / iwrite_login / iwrite_status',
+    'educoder-auto: 已注册 educoder_solve / educoder_login / educoder_status / iwrite_solve / iwrite_login / iwrite_status / chaoxing_solve / chaoxing_login / chaoxing_status',
   );
 }
 

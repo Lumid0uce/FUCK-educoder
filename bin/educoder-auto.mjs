@@ -19,6 +19,9 @@ import * as api from '../lib/educoder-api.mjs';
 import * as iwriteSolver from '../lib/iwrite-solver.mjs';
 import * as iwriteSession from '../lib/iwrite-session.mjs';
 import * as iwriteApi from '../lib/iwrite-api.mjs';
+import * as chaoxingSolver from '../lib/chaoxing-solver.mjs';
+import * as chaoxingSession from '../lib/chaoxing-session.mjs';
+import * as chaoxingApi from '../lib/chaoxing-api.mjs';
 
 const USAGE = `
 educoder-auto —— 头歌自动解题 / iWrite 自动写作 CLI
@@ -52,6 +55,20 @@ iWrite（英语写作）：
       --json              输出完整 JSON
   educoder-auto iwrite-tasks                   列出我的 iWrite 作业
 
+学习通（超星）：
+  educoder-auto chaoxing-status                查看学习通登录态与待做作业
+  educoder-auto chaoxing-login [选项]          打开浏览器登录学习通，保存登录态
+      --timeout <n>           登录等待秒数（默认 300）
+      --force                 已有登录态也重登
+  educoder-auto chaoxing-logout                清空学习通登录态
+  educoder-auto chaoxing-solve [url|关键词] [选项]  做一份作业（不给就挑列表第一份）
+      --submit            真的交卷（默认只暂存）
+      --no-verify         不做事后回读校验
+      --extra <text>      额外作答要求，例如「全用英文作答」
+      --gap <ms>          每题之间的间隔毫秒
+      --json              输出完整 JSON
+  educoder-auto chaoxing-works                 列出待做作业
+
 环境变量：
   EDUC_AI_BASEURL    OpenAI 兼容接口地址（没有宿主 llm 时的兜底通道）
   EDUC_AI_KEY        对应 apiKey
@@ -75,6 +92,9 @@ async function main() {
       user: { type: 'string' },
       pass: { type: 'string' },
       manual: { type: 'boolean', default: false },
+      force: { type: 'boolean', default: false },
+      gap: { type: 'string' },
+      'no-verify': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
   });
@@ -313,13 +333,100 @@ async function main() {
       return result.ok ? 0 : 1;
     }
 
+    case 'chaoxing-status':
+    case 'chaoxing-works': {
+      const saved = await chaoxingSession.loadSession();
+      console.log(`登录态文件：${chaoxingSession.sessionFile()}${saved ? '（存在）' : '（不存在）'}`);
+      if (!saved?.cookies) {
+        console.log('登录态：❌ 还没有，运行 `educoder-auto chaoxing-login`');
+        return 1;
+      }
+      const v = await chaoxingSession.validateCookies(saved.cookies);
+      console.log(`登录态：${v.ok ? '✅ 有效' : '❌ ' + v.reason}${saved.savedAt ? `（保存于 ${saved.savedAt}）` : ''}`);
+      if (v.ok) {
+        const works = await chaoxingApi.listWorks(saved.cookies);
+        console.log(`作业：共 ${works.length} 份`);
+        for (const w of works) {
+          const tag = w.submitted ? '已提交' : w.status || '未提交';
+          console.log(`  ${String(w.index).padStart(2)}. [${tag}] ${w.title || '(无标题)'}  (taskrefId=${w.taskrefId || '-'} course=${w.courseId || '-'})`);
+        }
+      }
+      console.log(`HTTP AI 兜底：${aiConfig.baseURL ? '已配置 ' + aiConfig.baseURL : '未配置'}`);
+      return v.ok ? 0 : 1;
+    }
+
+    case 'chaoxing-login': {
+      if (!values.force) {
+        const saved = await chaoxingSession.loadSession();
+        if (saved?.cookies) {
+          const v = await chaoxingSession.validateCookies(saved.cookies);
+          if (v.ok) {
+            console.log('✅ 已有有效登录态，直接复用（要重登加 --force）');
+            return 0;
+          }
+          console.log(`原有登录态失效：${v.reason}，重新登录`);
+        }
+      }
+      const payload = await chaoxingSession.loginInteractive({
+        log: (m) => console.log(m),
+        timeoutMs: Number(values.timeout) * 1000,
+      });
+      console.log(`✅ 学习通登录态已保存：${chaoxingSession.sessionFile()}（${payload.savedAt}）`);
+      return 0;
+    }
+
+    case 'chaoxing-logout': {
+      await chaoxingSession.clearSession();
+      console.log('已清空学习通登录态');
+      return 0;
+    }
+
+    case 'chaoxing-solve': {
+      const target = positionals[1];
+      const trace = chaoxingSolver.createTrace();
+      const result = await chaoxingSolver.solveWork({
+        workUrl: target && target.includes('doHomeWork') ? target : undefined,
+        taskUrl: target && target.includes('mtaskmsgspecial') ? target : undefined,
+        pick: target && !target.includes('doHomeWork') && !target.includes('mtaskmsgspecial') ? target : undefined,
+        llm: undefined,
+        aiConfig,
+        submit: values.submit,
+        verify: values['no-verify'] !== true,
+        extra: values.extra,
+        gapMs: values.gap !== undefined ? Number(values.gap) : 0,
+        trace,
+      });
+      if (values.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(trace.text());
+        console.log('');
+        if (result.title) console.log(`作业：${result.title}`);
+        if (result.count) console.log(`题目：${result.count} 道`);
+        if (result.problems?.length) {
+          console.log('没答上的：');
+          for (const p of result.problems) console.log(`  - ${p}`);
+        }
+        if (result.verified) {
+          const v = result.verified;
+          const total = (v.matched ?? 0) + (v.mismatch?.length ?? 0);
+          console.log(`回读：${v.ok ? '✅ 一致' : '⚠️ 有对不上的'}（核对 ${v.matched ?? 0}/${total} 题）`);
+          for (const m of v.mismatch || []) console.log(`  ⚠️ ${m.questionId}：${m.reason}`);
+        }
+        console.log('');
+        if (result.ok && result.submitted) console.log('✅ 已交卷');
+        else if (result.ok) console.log('✅ 已暂存（未交卷）');
+        else console.log(`⚠️ 未完成：${result.reason ?? ''}`);
+      }
+      return result.ok ? 0 : 1;
+    }
+
     default:
       console.error(`未知命令：${cmd}`);
       console.log(USAGE);
       return 2;
   }
 }
-
 main()
   .then((code) => process.exit(code ?? 0))
   .catch((error) => {

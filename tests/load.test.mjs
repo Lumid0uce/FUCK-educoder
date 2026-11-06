@@ -66,8 +66,18 @@ export default async function run() {
   const names = registered.map((t) => t.name).sort();
   assert.deepEqual(
     names,
-    ['educoder_login', 'educoder_solve', 'educoder_status', 'iwrite_login', 'iwrite_solve', 'iwrite_status'],
-    '应注册 6 个工具（头歌 3 + iWrite 3）',
+    [
+      'chaoxing_login',
+      'chaoxing_solve',
+      'chaoxing_status',
+      'educoder_login',
+      'educoder_solve',
+      'educoder_status',
+      'iwrite_login',
+      'iwrite_solve',
+      'iwrite_status',
+    ],
+    '应注册 9 个工具（头歌 3 + iWrite 3 + 学习通 3）',
   );
 
   // 每个工具的形状都要能过宿主校验
@@ -123,5 +133,5 @@ export default async function run() {
   assert.ok(iwOut.text.includes('AI：'), 'iwrite_status 应报 AI 路由');
   assert.ok(lossless(iwOut), 'iwrite_status 返回含非 JSON 值');
 
-  return `插件装配：6 个工具 + 1 个 skill 形状全合法；educoder_status / iwrite_status 自检通过`;
+  return `插件装配：9 个工具 + 1 个 skill 形状全合法；educoder_status / iwrite_status 自检通过`;
 }

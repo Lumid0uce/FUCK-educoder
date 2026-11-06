@@ -1,9 +1,10 @@
 # dsh-educoder-auto
 
-给 DeepSeek Harness（DSH）用的自动解题插件，现在覆盖两个平台：
+给 DeepSeek Harness（DSH）用的自动解题插件，现在覆盖三个平台：
 
 - **头歌（Educoder）**：丢一个题目网址给它，它自己抓题干、让 AI 写代码、写回平台、提交评测，评测不过还会看着报错重写。
 - **iWrite（外研社英语写作 iwrite.unipus.cn）**：丢一个写作页网址（或者干脆不给，自动挑一份没写的），它按体裁 / 词数区间 / 题干要点 / 关键词写一篇、逐条自检、保存并提交。
+- **学习通（超星 mooc1-api.chaoxing.com）**：丢一个作业地址（或者干脆不给），它把整份作业的题抓下来、AI 逐题作答、逐题暂存、回读页面对一遍答案，确认无误再交卷。
 
 ```
 你：帮我做这个 https://www.educoder.net/tasks/xxxxx?homework_common_id=123
@@ -11,9 +12,12 @@
 
 你：帮我写这个 https://iwrite.unipus.cn/student/daily/write?taskId=...&uid=...&classId=...
 它：→ 登录态检查 → 拉任务（体裁/词数/要点）→ AI 写稿 → 自检（词数/要点/中文）→ 保存 → 提交 → 回读
+
+你：帮我把学习通这个作业做了 https://mooc1-api.chaoxing.com/mooc-ans/work/phone/doHomeWork?...
+它：→ 登录态检查 → 翻页抓题 → AI 逐题作答 → 逐题暂存 → 回读页面核对 → 交卷
 ```
 
-两个平台各用各的登录态、各用各的浏览器 profile，互不影响。
+三个平台各用各的登录态、各用各的浏览器 profile，互不影响。
 
 ## 装
 
@@ -38,7 +42,7 @@ dsh plugin --profile desktop add link:/path/to/dsh-educoder-auto
 
 装完**重启 DSH**（服务端插件不是热更新的）。
 
-## 六条工具
+## 九条工具
 
 | 工具 | 干什么 |
 |---|---|
@@ -48,6 +52,9 @@ dsh plugin --profile desktop add link:/path/to/dsh-educoder-auto
 | `iwrite_status` | iWrite 体检：登录态、有几份待写作业、AI 路由 |
 | `iwrite_login` | 登录 iWrite：默认用保存的账号密码自动登，失败才弹窗手动登 |
 | `iwrite_solve` | 给网址（或不给），写一篇并提交 |
+| `chaoxing_status` | 学习通体检：登录态、待做作业列表、AI 路由 |
+| `chaoxing_login` | 开浏览器让你登录学习通一次，把整套 cookie 存到本地 |
+| `chaoxing_solve` | 给作业地址（或不给），抓整份作业的题、逐题作答、暂存、回读核对、交卷 |
 
 `educoder_solve` 的参数：
 
@@ -291,9 +298,72 @@ iwrite_solve(url=..., extra="多用简单句，别用生僻词")
 
 调试时用 `speed: 0.02` 快进 50 倍，`speed: 0` 完全不等待。
 
-## 拟人化（时间节奏 + 代码风格）
+## 学习通：作业（`chaoxing_solve`）
+
+学习通（超星）的作业是**整份一份**的：一份作业十道题、二十分，全在同一个页面上翻页。所以这里的做法跟头歌不一样——不是「一题一提交」，而是「一次抓全、逐题作答、整份交卷」。
+
+### 登录
+
+```js
+chaoxing_login({ timeoutSec: 300 })
+```
+
+开一个有头 Edge，你在里面登录一次（手机号 + 验证码、或者扫码），登录成功后插件把整套 cookie（`_uid` / `_d` / `fid` / `vc3` 等，覆盖 `chaoxing.com` 几个域）存到 `~/.dsh/educoder-auto/chaoxing-session.json`（chmod 600），浏览器 profile 单独放在 `~/.dsh/educoder-auto/chaoxing-profile`。
+
+已经有有效登录态时默认直接复用、不弹窗；要重登传 `force: true`。
+
+### 怎么用
+
+```js
+chaoxing_solve({ url: 'https://mooc1-api.chaoxing.com/mooc-ans/work/phone/doHomeWork?courseId=...' })
+chaoxing_solve({})                              // 挑作业列表第一份
+chaoxing_solve({ pick: '第三章' })               // 按标题关键词挑
+chaoxing_solve({ submit: false })               // 只暂存，不交卷
+```
+
+- `url`：`doHomeWork` 作业地址最准；`android/mtaskmsgspecial?type=work&taskrefId=...` 的入口链接也认；给别的就当成 `pick` 关键词。
+- `submit`：默认跟随配置 `chaoxing.autoSubmit`（默认 `true`）。`false` 就只暂存，老师那边看不到。
+- `verify`：暂存后回读页面对答案，默认 `true`。建议别关——作业交上去就撤不回来了。
+- `extra`：额外作答要求，会当硬约束拼进题干（「全用中文」「简答不少于 80 字」）。
+- `gapMs`：每题之间的间隔毫秒，默认 0。
+
+### 链路
+
+1. **定位** —— `GET https://mooc1-api.chaoxing.com/work/stu-work` 列作业，挑出 `mtaskmsgspecial?type=work&taskrefId=` 的入口；入口会 **302** 到 `mooc-ans/work/phone/task-work?...`，真正的 `doHomeWork?...` 地址在这一页的 HTML 里（所以 `request()` 会跟同源 GET 跳转，最多 5 跳）。
+2. **抓题** —— 给地址加 `index=N` 一页一页翻（一页一题），直到题号重复或翻不动。翻页前必须**删掉 `checkIntegrity=true`**：带着它服务端会忽略 `index`，永远返回第一题（`enc` 反过来不能删，删了直接给信息提示页）。每页解析：题号（`id="questionId"`）、题型、分值、题干（`.ans-cc`）、选项（手机端不是 radio，是 `div.Answer span[orichoice]`）、填空控件个数，以及**这一页自己的隐藏域**。
+3. **作答** —— 把整份题（题型 + 题干 + 选项 value）一次交给模型，让它只回 `{"answers":[{"id","answer"}]}`。再把答案翻译成页面控件的 value。
+4. **暂存** —— 逐题 `POST /mooc-ans/work/phone/doNormalHomeWorkSubmit?tempSave=true`，每题用它**自己那一页**的隐藏域 + `answer{题号}`。
+5. **回读** —— 重新翻一遍页面，把每道题实际存进去的内容跟预期比对。选择题看 `span[orichoice]` 的 `checked` 类；简答题的答案在隐藏域 `answer{qid}` 里（**单引号包裹、可跨行、里面还可能有双引号**），读不到再退回 `span#answerAria` 的 `aria-label`。对不上时 `verified.mismatch` 会给「页面 N 字 / 提交 M 字、从第几字开始岔」。— 两条都不认，就说明真没存进去。
+6. **交卷** —— 回读没问题才 `tempSave=false` 走最后一遍。
+
+### 题型怎么处理
+
+| 题型 | 模型给什么 | 提交成什么 |
+|---|---|---|
+| 单选题 | `B`（字母） | `answer{qid}=` 选项 value（就是 `B`） |
+| 多选题 | `AC`（连着写） | **两个同名字段** `answer{qid}=A&answer{qid}=C` |
+| 判断题 | `对` / `错` | `answer{qid}=true` / `false`（控件 value 就是这个） |
+| 填空题（多空） | 每行一个空 | 每空一个同名 `answer{qid}` 字段 |
+| 简答 / 名词解释 / 论述 / 计算 | 正文 | 原样塞进那唯一一个 textarea |
+
+答案格式不靠猜：选项的合法值直接读 `span[orichoice]` 的 `orichoice`（页面上显示的字母常被**打乱**，`orichoice` 才是提交值），判断题只可能是 `true`/`false`，所以模型给的是「人话」，插件负责翻成控件值。另外题型编号是固定表：0 单选 / 1 多选 / 2 填空 / 3 判断 / 4 简答 / 5 名词解释 / 6 论述 / 7 计算——4~7 在页面上都是「一个多行编辑器」，所以必须靠编号区分成 `text`，不能只看控件。
+
+### 为什么不用 PC 页面 DOM
+
+PC 端作业正文在 iframe 里，填空/简答用 UEditor（`UE.getEditor(name).setContent()`），页面结构随版本变。移动端的 `mooc1-api.chaoxing.com` 接口是同一份数据、结构稳定、还带全部隐藏域，所以整条链路都走接口，浏览器只用来登录一次。
+
+### 出问题先看这几条
+
+- 报 `NEED_LOGIN` / 一直 302 跳 `passport2`：登录态过期了，重跑 `chaoxing_login`。
+- 抓不到题（`没抓到题目`）：多半是这份作业已经交过、或者这个入口不是作业（是考试 `type=exam`）。
+- 回读有个别题对不上：看 `verified.mismatch` 里给的题号和原因——「页面 0 字」基本就是没存进去（再跑一次）；「页面 N 字 / 提交 M 字，从第几字开始岔」说明后台改写了内容（超长截断、编辑器过滤）。
+- 暂存成功但交卷报错：先看 `trace` 里最后一步，别反复重点交卷——学习通也会限流。
+
+
 
 默认开启。目的只有一个：让提交记录别一眼就看出是脚本刷的。
+
+## 拟人化（时间节奏 + 代码风格）
 
 ### 时间节奏
 
@@ -387,6 +457,12 @@ styleSampleTasks: 4      # 归纳风格时最多翻几道历史关卡
       humanizeSpeed: 1      # 300 词作文约 30~60 分钟；0.02 = 快进 50 倍
       humanizeProfile: normal
       taskTimeoutMs: 7200000  # 单篇最多 2 小时（拟人节奏下确实要这么久）
+    chaoxing:               # 学习通作业部分，同样独立
+      autoSubmit: true      # false = 只暂存不交卷
+      verify: true          # 暂存后回读页面对答案，建议别关
+      gapMs: 0              # 每题之间的间隔毫秒
+      extra: ''             # 额外作答要求（工具参数优先）
+      taskTimeoutMs: 1800000
 ```
 
 AI 通道默认用 DSH 自己的模型（不用额外配 key）。只有宿主 `llm` 服务不可用时才会走 HTTP 兜底。
@@ -406,6 +482,12 @@ node bin/educoder-auto.mjs iwrite-status
 node bin/educoder-auto.mjs iwrite-login
 node bin/educoder-auto.mjs iwrite-tasks
 node bin/educoder-auto.mjs iwrite-solve [url] --submit --speed 0.02 --extra "多用简单句"
+
+# 学习通
+node bin/educoder-auto.mjs chaoxing-status
+node bin/educoder-auto.mjs chaoxing-login
+node bin/educoder-auto.mjs chaoxing-works
+node bin/educoder-auto.mjs chaoxing-solve [url|关键词] --submit --extra "简答题不少于 80 字"
 ```
 
 环境变量：`EDUC_AI_BASEURL` / `EDUC_AI_KEY` / `EDUC_AI_MODEL`。
@@ -431,12 +513,21 @@ node bin/educoder-auto.mjs iwrite-solve [url] --submit --speed 0.02 --extra "多
 - **iWrite 的响应不都带信封**：`/api/student_task_index/loadByStudentId` 直接返回 `{totalPages, stid, totalElements}`，没有 `{code,msg,data}`。
 - **iWrite 的题干是转义过的 HTML**（`&lt;p&gt;`），要先 `htmlToText` 再喂模型，否则模型看到一堆实体符号。
 - **iWrite 写作页的提交按钮没有文字**，只有 `aria-label="提交"` 和一张图片，按文字点不到。
+- **学习通交作业每题必须用它自己那一页的隐藏域**：混进别的页的字段（尤其 `questionId`）后台只认第一条，后面的题会存成空白。所以 `fetchWork` 会把每页的隐藏域一起留着，提交时按题号取自己那份。
+- **学习通多选/多空要发同名重复字段**：`answer1234=A&answer1234=C`；拼成 `answer1234=A,C` 后台只认第一个，等于只选了一个。
+- **学习通的判断题控件 value 是 `true`/`false`**，不是「对/错」也不是 0/1；选择题是选项字母。
+- **学习通 PC 端作业正文在 iframe 里 + UEditor**，DOM 路不稳定，整条链路走 `mooc1-api.chaoxing.com` 的移动端接口。
+- **学习通交卷不可逆**：默认先全量 `tempSave=true` → 回读页面比对 → 才 `tempSave=false`。改了这块务必保留回读。
+- **学习通作业入口是 302 的**：`mtaskmsgspecial` 跳 `task-work`，`doHomeWork` 地址在跳转后的 HTML 里。请求层不跟跳转就只会拿到空 body，然后误报「找不到作业入口」。
+- **学习通翻页必须摘掉 `checkIntegrity=true`**：带着它服务端无视 `index`，每页都返回第一题（题号一模一样，看起来像「抓到了但只有一题」）。而 `enc` 不能删，删了返回的是信息提示页。
+- **学习通简答答案的隐藏域是单引号 + 可跨行**：`<input type="hidden" name="answer{题号}" value='一大段正文'>`。用 `/<input[^>]*>/` 抓会在第一个 `>` 处断掉，读回空串 → 回读永远「对不上」。正确写法是按引号扫标签（`scanTags`）。
+- **学习通选项要取 `orichoice` 而不是显示的文字**：`span` 里显示的字母是打乱后的，`orichoice` 才是提交值。
 
 ## 文件结构
 
 ```
 educoder-auto/
-├── index.js                    插件入口：注册 6 个工具 + 1 个 skill
+├── index.js                    插件入口：注册 9 个工具 + 1 个 skill
 ├── cordis.patch.yml            bundle patch
 ├── lib/
 │   ├── browser.mjs             浏览器层（playwright-core + 系统 Edge）
@@ -450,7 +541,11 @@ educoder-auto/
 │   ├── iwrite-session.mjs      iWrite 登录态（独立 profile、自动登录 + 手动兜底）
 │   ├── iwrite-ai.mjs           作文 prompt / 抽取 / 逐条校验 / 重写
 │   ├── iwrite-solver.mjs       写作编排层：任务 → 写稿 → 校验 → 保存 → 提交 → 回读
-│   └── iwrite-browser.mjs      写作页兜底路（过写前构思门 + 填 textarea/TinyMCE + 点提交）
+│   ├── iwrite-browser.mjs      写作页兜底路（过写前构思门 + 填 textarea/TinyMCE + 点提交）
+│   ├── chaoxing-api.mjs        学习通接口层（列作业 / 翻页抓题 / 逐题提交 / 回读）
+│   ├── chaoxing-session.mjs    学习通登录态（独立 profile、整套 cookie 落盘）
+│   ├── chaoxing-ai.mjs         逐题作答 prompt / JSON 抽取 / 答案翻译成控件 value
+│   └── chaoxing-solver.mjs     学习通编排层：定位 → 抓题 → 作答 → 暂存 → 回读 → 交卷
 ├── bin/educoder-auto.mjs       CLI
 ├── tests/                      测试（见下）
 └── skills/educoder-auto/SKILL.md
@@ -468,7 +563,7 @@ node tests/run.mjs --all  # 全测：再加浏览器 e2e，会真开一个 Edge 
 | `api.test.mjs` | 签名算法、URL 解析（含三段式 `/tasks/<课>/<hw>/<task>`）、字段归一、占位符识别、题型判定 |
 | `ai-code.test.mjs` | 代码块提取（单/多文件）、裸代码 vs 人话、prompt 截断 |
 | `verdict.test.mjs` | 页面文字判定、`game_status` 解析（含「拉容器」阶段必须算 pending） |
-| `load.test.mjs` | 用假 ctx 跑 `apply()`，校验 6 个工具 / skill 形状能过宿主校验（含无损 JSON） |
+| `load.test.mjs` | 用假 ctx 跑 `apply()`，校验 9 个工具 / skill 形状能过宿主校验（含无损 JSON） |
 | `api-e2e.test.mjs` | fetch 打桩跑完整 API 编排，验证 fail → 回喂报错 → pass |
 | `browser-e2e.test.mjs` | 真开 Edge 跑本地 fixture，正例过、反例挂 |
 | `vision.test.mjs` | 截图兜底：文本模型下正确跳过，不多烧模型调用 |
@@ -476,6 +571,7 @@ node tests/run.mjs --all  # 全测：再加浏览器 e2e，会真开一个 Edge 
 | `credentials.test.mjs` | iWrite 账号密码存取：落盘路径、回读、清空、脏文件兜底（用临时 DSH_HOME，不碰真实凭据） |
 | `humanize.test.mjs` | 拟人化：节奏抖动区间、sleep 可中断、风格归纳、风格套用（含字符串/注释/宏不误改的不变式） |
 | `iwrite.test.mjs` | iWrite：接口信封/登录失效识别、保存 payload 形状、作文抽取与逐条校验（词数/关键词/中文/单段）、拟人时长 |
+| `chaoxing.test.mjs` | 学习通：翻页抓题、五种题型识别、答案翻译成控件 value、**逐题用自己那页的隐藏域**、多选/多空同名重复字段、先暂存后回读再交卷、`submit: false` 只暂存、空作业与 302 跳登录 |
 
 ## 边界
 

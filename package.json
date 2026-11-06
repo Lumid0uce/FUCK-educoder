@@ -1,6 +1,6 @@
 {
   "name": "dsh-educoder-auto",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "自动做题与写作插件：头歌（Educoder）给网址就抓题干、AI 出代码/答案、写回并提交评测；iWrite（iwrite.unipus.cn）按体裁/词数/要点自动写英语作文并提交。带拟人化节奏与代码风格对齐",
   "keywords": [
     "dsh",

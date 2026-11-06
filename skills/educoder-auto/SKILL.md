@@ -1,10 +1,11 @@
-# 自动解题 / 自动写作（头歌 + iWrite）
+# 自动解题 / 自动写作（头歌 + iWrite + 学习通）
 
-两个平台，六条工具：
+三个平台，九条工具：
 
 - **头歌（Educoder）**：给题目网址 → 抓题干 → AI 出答案 → 写回 → 提交评测 → 不过就看着报错重写。
   支持三类题：**编程题**、**选择题**、**填空题**。
 - **iWrite（外研社英语写作 iwrite.unipus.cn）**：给写作页网址（或直接不给）→ 拉任务要求 → AI 写作文 → 逐条自检 → 保存 → 提交。
+- **学习通（超星 mooc1-api.chaoxing.com）**：给作业地址（或直接不给）→ 拉整份作业的题 → AI 逐题作答 → 逐题暂存 → 回读页面对答案 → 确认无误再交卷。
 
 ## 什么时候用
 
@@ -12,6 +13,8 @@
 
 **iWrite**：用户说「帮我写这个 iwrite」「英语作文自动写」「外研社写作平台」「按它要求写一篇」，且给了 `iwrite.unipus.cn` 网址。
 用户只说「写作作业」但没说平台时，先看网址；没给网址就问一句平台，别瞎猜。
+
+**学习通**：用户说「学习通作业帮我做了」「超星这个作业做一下」「chaoxing 课堂作业」，或给了 `mooc1-api.chaoxing.com` / `mooc1.chaoxing.com` 的作业地址。
 
 ## 头歌：三步走
 
@@ -36,6 +39,28 @@
    - 想先看稿不提交：`submit: false`（只存草稿）
    - 有额外写作要求：`extra: "多用简单句，别用生僻词"`
    - 快速验证：`speed: 0.02`（快进 50 倍）
+
+## 学习通：三步走
+
+1. **`chaoxing_status`** —— 看登录态、待做作业列表（标题 / taskrefId / 入口链接）、AI 路由。
+2. **`chaoxing_login`** —— 打开 Edge，让用户在窗口里登录一次（手机号 + 验证码 / 扫码都行）。
+   登录成功后自动抓整套 cookie 存到 `~/.dsh/educoder-auto/chaoxing-session.json`（和头歌、iWrite 互相独立）。
+   已经有有效登录态时默认直接复用，不弹窗；要重登就传 `force: true`。
+3. **`chaoxing_solve`** —— 传 `url`（作业地址最准；也可以给关键词 / 序号），不传就挑列表第一份。
+   - 想先看答案不交卷：`submit: false`（只逐题暂存，老师那边看不到）
+   - 有额外作答要求：`extra: "全用中文作答，简答题不少于 80 字"`
+   - 不想回读校验（更快）：`verify: false`
+
+## 学习通是怎么做出来的（不用 DOM，走移动端 API）
+
+PC 端作业页是 iframe + UEditor，几乎没法稳定自动化；所以走 `mooc1-api.chaoxing.com` 的移动端接口：
+
+1. `GET /work/stu-work` 列出作业，挑出 `android/mtaskmsgspecial?type=work&taskrefId=...` 的入口。
+2. 打开入口页，正则找 `/work/phone/doHomeWork?...` 的真实作业地址。
+3. 给地址加 `index=N` 翻页，一页一题，逐页解析：题号、题型、分值、题干、选项控件的 `value`。
+4. 让模型按题型作答，再把答案翻译成**页面控件的 value**（单选/多选直接用选项 value，判断用 `true`/`false`，多空按空拆行）。
+5. 用**每题自己那一页的隐藏域** + `answer{题号}` 提交 `doNormalHomeWorkSubmit`，先 `tempSave=true` 全过一遍。
+6. 回读页面核对，确认每道题都存对了，才用 `tempSave=false` 交卷。
 
 ## 参数速查
 
@@ -64,6 +89,15 @@
 | `iwrite_login` | `manual` | `true` = 跳过自动登录直接弹窗 |
 | `iwrite_login` | `timeoutSec` | 手动登录时等多久，默认 300 |
 | `iwrite_status` | 无 | 体检 + 待写作业列表 |
+| `chaoxing_solve` | `url` | 作业地址（`doHomeWork` 链接最准；`mtaskmsgspecial` 入口也行），可不传 |
+| | `pick` | 不传 url 时挑哪份：课程 / 作业标题关键词，或列表序号（1 起） |
+| | `submit` | 是否真交卷，默认跟随配置（`chaoxing.autoSubmit`）；`false` = 只暂存 |
+| | `verify` | 暂存后回读页面对答案，默认 `true`（建议别关） |
+| | `extra` | 额外作答要求，会当硬约束拼进题干 |
+| | `gapMs` | 每题之间的间隔毫秒，默认 0 |
+| `chaoxing_login` | `timeoutSec` | 等登录的秒数，默认 300 |
+| | `force` | 已有登录态也重登 |
+| `chaoxing_status` | 无 | 体检 + 待做作业列表 |
 
 ## 两条通道怎么选
 
@@ -199,3 +233,19 @@ iWrite 专属的坑：
 - **`preWriteRequired: 1` 的作业多一道门**。会先落到 `/student/daily/prewrite`，必须往「写作构思智能体」的聊天框发一条消息，「我要写作」按钮才解锁。走接口时不受影响；走浏览器兜底时插件会自动过这道门。
 - **浏览器兜底里，提交按钮没有文字**，只有 `aria-label="提交"` 和一张图片，点完还要点 antd confirm 的「确定」。
 - **写作页正文不是 TinyMCE**，就是普通 `textarea[placeholder="请在此撰写你的作文..."]`（umi.js 里有 tinymce 依赖但线上没启用）。
+
+### 学习通（chaoxing）
+
+- **每题必须用它自己的隐藏域**。交作业时 payload 里混进过别的页的 questionId/任务字段，后台只认第一条，后面的题会存成空白。插件按题号找自己的那一页再提交，改动这块时别图省事共用第一页。
+- **多选和填空要发「同名重复字段」**。`answer1234=A&answer1234=C` 才是多选；拼成 `answer1234=A,C` 后台只认第一个。
+- **交作业不可逆**。所以默认先全量 `tempSave=true`，回读比对一致才 `tempSave=false`。要跳过回读就 `verify: false`，但别在真作业上关。
+- **答案必须是控件的 value，不是人话**。判断题控件是 `true`/`false`（不是「对/错」），选择题是 `A`/`B`；插件从页面读 value 再翻译，别硬编码。
+- **简答题也是单个 textarea**，跟填空长得一样，靠页面题型编号（4 简答 / 5 名词解释 / 6 论述 / 7 计算）区分。
+- **登录态会过期**。报 `NEED_LOGIN`（或 302 跳 passport2）就重跑 `chaoxing_login`。
+- **PC 端页面别硬啃**。作业正文在 iframe 里、编辑器是 UEditor，DOM 路极不稳定；所有抓题/提交都走 `mooc1-api.chaoxing.com` 的移动端接口。
+- **入口是 302 的**。`mtaskmsgspecial` 会跳 `task-work`，真正的 `doHomeWork` 地址在跳转后的 HTML 里；请求层不跟同源跳转就只拿到空 body。
+- **翻页要摘 `checkIntegrity=true`**，否则服务端无视 `index`、每页都是第一题；`enc` 反过来不能删。
+- **选项取 `orichoice`**，不是 `span` 里显示的字母（页面会打乱显示顺序）。
+- **简答答案在隐藏域 `answer{题号}` 里，单引号包裹且可跨行**，读回时要用认引号的扫描（`scanTags`），再用 `span#answerAria` 的 `aria-label` 兜底。回读对不上时看 `verified.mismatch` 的「页面 N 字 / 提交 M 字」判断是真没存还是被后台改写。
+
+
